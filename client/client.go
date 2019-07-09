@@ -4,20 +4,52 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand"
 	"net"
 	"strconv"
+	"sync"
 	"time"
 )
 
-func send(conn net.Conn) {
-	for i := 0; i < 30; i++ {
-		dic := make(map[string]interface{})
-		dic["index"] = i
-		dic["timestamp"] = time.Now().Format(time.RFC3339)
-		jsonString, err := json.Marshal(dic)
-		if err != nil {
-			log.Println(err)
+var waitGroup sync.WaitGroup
+
+func disconnect(conn net.Conn)  {
+	conn.Close()
+	waitGroup.Done()
+}
+
+func generate(infoData chan string)  {
+	index := 0
+	for {
+		index++
+		if rand.Intn(200) == 199 {
+			//退出程序
+			infoData <- "quit"
+			return
+		} else {
+			dic := make(map[string]interface{})
+			dic["index"] = index
+			dic["timestamp"] = time.Now().Format(time.RFC3339)
+			jsonString, err := json.Marshal(dic)
+			if err != nil {
+				log.Println(err)
+			}
+			infoData <- string(jsonString)
+
+			time.Sleep(time.Duration(rand.Intn(5) * int(time.Second)))
 		}
+	}
+}
+
+func send(conn net.Conn, infoData chan string) {
+	for {
+		jsonString := <- infoData
+		if jsonString == "quit" {
+			disconnect(conn)
+			return
+		}
+
+		//按协议发送数据
 		length := len(jsonString)
 		if length > 99999 {
 			//Header中标识字符串长度的最大为99999
@@ -26,14 +58,35 @@ func send(conn net.Conn) {
 		lengthText := strconv.Itoa(length)
 		textLength := fmt.Sprintf("%05s", lengthText)[:5]
 		headerText := append([]byte("Header"), textLength...)
-		jsonString = append(headerText, jsonString...)
-		_, err = conn.Write([]byte(jsonString))
+		jsonString = string(append(headerText, jsonString...))
+		_, err := conn.Write([]byte(jsonString))
 		if err != nil {
 			log.Println(err)
 		}
 		log.Println("send : ", string(jsonString))
 	}
-	log.Println("send finished")
+}
+
+func read(conn net.Conn) {
+	buffer := make([]byte, 2048)
+	for {
+		log.Println("waiting for read...")
+		reqLen, err := conn.Read(buffer)
+		if err != nil {
+			log.Println(err)
+			disconnect(conn)
+			return
+		}
+		log.Println("read length : ", reqLen)
+		received := string(buffer[:reqLen-1])
+		log.Println(received)
+
+		//服务端请求关闭
+		if received == "quit" {
+			disconnect(conn)
+			return
+		}
+	}
 }
 
 func main()  {
@@ -50,7 +103,14 @@ func main()  {
 		return
 	}
 
+	waitGroup.Add(1)
+
 	log.Println("connect success")
-	send(conn)
-	conn.Close()
+
+	infoData := make(chan string)
+	go send(conn, infoData)
+	go read(conn)
+	go generate(infoData)  //模拟业务逻辑
+
+	waitGroup.Wait()
 }
